@@ -1,0 +1,33 @@
+# Secrets. .env.example is a template without real values, so it stays in git.
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / Vite
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# OS and IDE
+.DS_Store
+Thumbs.db
+.idea/
+
+# Local media and model weights. These files are large and are not source code.
+data/
+ml/data/
+ml/artifacts/
+*.pt
