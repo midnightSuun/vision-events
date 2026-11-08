@@ -1,4 +1,4 @@
-"""Обучение трёхслойной сети на Pascal VOC (dictvv/voc-yolo)."""
+"""Train a three-layer network on Pascal VOC (dictvv/voc-yolo)."""
 
 import argparse
 import sys
@@ -15,8 +15,8 @@ REPO_ID = "dictvv/voc-yolo"
 DATASET_DIR = Path(__file__).resolve().parent / "data" / "voc-yolo"
 ARCHIVE_NAME = "voc.tar"
 
-CLASS_NAMES = ("человек", "транспорт", "животное")
-# Индексы YOLO из VOC: aeroplane, bicycle, bird, boat, bottle, bus, car, cat, ...
+CLASS_NAMES = ("person", "vehicle", "animal")
+# YOLO class indices from VOC: aeroplane, bicycle, bird, boat, bottle, bus, car, cat, ...
 VOC_TO_SUPER = {
     0: 1,
     1: 1,
@@ -33,8 +33,9 @@ VOC_TO_SUPER = {
     16: 2,
     18: 1,
 }
-TRAIN_SPLITS = ("train2007", "val2007", "train2012", "val2012")
-VAL_SPLITS = ("test2007",)
+TRAIN_SPLITS = ("train2007", "train2012")
+VAL_SPLITS = ("val2007", "val2012")
+TEST_SPLITS = ("test2007",)
 
 IMAGE_SIZE = 32
 HIDDEN_1 = 128
@@ -66,13 +67,13 @@ def find_yolo_dirs(root: Path) -> tuple[Path, Path] | None:
 
 def ensure_dataset(directory: Path) -> Path:
     if find_yolo_dirs(directory) is not None:
-        print(f"датасет уже есть: {directory}")
+        print(f"dataset already present: {directory}")
         return directory
 
     directory.mkdir(parents=True, exist_ok=True)
     archive = directory / ARCHIVE_NAME
     if not archive.is_file():
-        print(f"скачиваю {REPO_ID}...")
+        print(f"downloading {REPO_ID}...")
         from huggingface_hub import hf_hub_download
 
         archive = Path(
@@ -84,12 +85,12 @@ def ensure_dataset(directory: Path) -> Path:
             )
         )
 
-    print(f"распаковываю {archive.name}...")
+    print(f"extracting {archive.name}...")
     with tarfile.open(archive, "r:") as tar:
         members = [member for member in tar.getmembers() if "VOCdevkit" not in Path(member.name).parts]
         tar.extractall(path=directory, members=members, filter="data")
     if find_yolo_dirs(directory) is None:
-        raise FileNotFoundError(f"после распаковки не нашлись images/{TRAIN_SPLITS[0]} и labels")
+        raise FileNotFoundError(f"after extraction, images/{TRAIN_SPLITS[0]} and labels were not found")
     archive.unlink(missing_ok=True)
     return directory
 
@@ -127,7 +128,7 @@ def load_split(images_dir: Path, labels_dir: Path, split: str) -> list[Sample]:
     image_dir = images_dir / split
     label_dir = labels_dir / split
     if not image_dir.is_dir() or not label_dir.is_dir():
-        raise FileNotFoundError(f"нет сплита {split}")
+        raise FileNotFoundError(f"missing split {split}")
 
     samples: list[Sample] = []
     missing = 0
@@ -141,14 +142,14 @@ def load_split(images_dir: Path, labels_dir: Path, split: str) -> list[Sample]:
             continue
         samples.append(Sample(path=image_path, label=label))
     if missing:
-        print(f"{split}: пропущено кадров без файла: {missing}")
+        print(f"{split}: skipped frames with no image file: {missing}")
     return samples
 
 
-def load_samples(root: Path) -> tuple[list[Sample], list[Sample]]:
+def load_samples(root: Path) -> tuple[list[Sample], list[Sample], list[Sample]]:
     found = find_yolo_dirs(root)
     if found is None:
-        raise FileNotFoundError(f"нет YOLO-разметки VOC в {root}")
+        raise FileNotFoundError(f"no YOLO VOC labels in {root}")
     images_dir, labels_dir = found
 
     train_samples: list[Sample] = []
@@ -157,10 +158,15 @@ def load_samples(root: Path) -> tuple[list[Sample], list[Sample]]:
     val_samples: list[Sample] = []
     for split in VAL_SPLITS:
         val_samples.extend(load_split(images_dir, labels_dir, split))
+    test_samples: list[Sample] = []
+    for split in TEST_SPLITS:
+        test_samples.extend(load_split(images_dir, labels_dir, split))
 
-    if len(train_samples) < 20 or len(val_samples) < 20:
-        raise RuntimeError(f"слишком мало кадров: train {len(train_samples)}, val {len(val_samples)}")
-    return train_samples, val_samples
+    if len(train_samples) < 20 or len(val_samples) < 20 or len(test_samples) < 20:
+        raise RuntimeError(
+            f"too few frames: train {len(train_samples)}, val {len(val_samples)}, test {len(test_samples)}"
+        )
+    return train_samples, val_samples, test_samples
 
 
 def class_counts(labels: np.ndarray) -> np.ndarray:
@@ -170,7 +176,7 @@ def class_counts(labels: np.ndarray) -> np.ndarray:
 def class_weights_from_counts(counts: np.ndarray) -> np.ndarray:
     if np.any(counts == 0):
         missing = [CLASS_NAMES[index] for index, count in enumerate(counts) if count == 0]
-        raise RuntimeError(f"в обучении нет примеров класса: {', '.join(missing)}")
+        raise RuntimeError(f"training set has no examples of class: {', '.join(missing)}")
     return counts.sum() / (len(CLASS_NAMES) * counts)
 
 
@@ -179,7 +185,7 @@ def load_images(samples: list[Sample], image_size: int) -> tuple[np.ndarray, np.
     for index, sample in enumerate(samples, start=1):
         images.append(load_rgb(sample.path, image_size))
         if index % 2000 == 0 or index == len(samples):
-            print(f"загружено кадров: {index}/{len(samples)}")
+            print(f"loaded frames: {index}/{len(samples)}")
     labels = np.array([sample.label for sample in samples], dtype=np.int64)
     return np.stack(images), labels
 
@@ -244,13 +250,13 @@ def macro_recall(labels: np.ndarray, predictions: np.ndarray) -> float:
 
 def train(epochs: int) -> Path:
     verify_gradients()
-    print("градиенты совпали с численной проверкой")
+    print("gradients match the numeric check")
 
     dataset_dir = ensure_dataset(DATASET_DIR)
-    train_samples, val_samples = load_samples(dataset_dir)
-    print("загружаю train...")
+    train_samples, val_samples, test_samples = load_samples(dataset_dir)
+    print("loading train...")
     train_images, train_labels = load_images(train_samples, IMAGE_SIZE)
-    print("загружаю val...")
+    print("loading val...")
     val_images, val_labels = load_images(val_samples, IMAGE_SIZE)
     print(f"train: {len(train_samples)} ({format_counts(class_counts(train_labels))})")
     print(f"val: {len(val_samples)} ({format_counts(class_counts(val_labels))})")
@@ -269,17 +275,14 @@ def train(epochs: int) -> Path:
         rng=rng,
     )
     print(
-        f"слои: {model.w1.shape[0]} -> {model.w1.shape[1]} -> {model.w2.shape[1]} -> {model.w3.shape[1]}, "
-        f"параметров {model.parameter_count()}"
+        f"layers: {model.w1.shape[0]} -> {model.w1.shape[1]} -> {model.w2.shape[1]} -> {model.w3.shape[1]}, "
+        f"parameters {model.parameter_count()}"
     )
-    print(f"train {train_labels.size}, val {val_labels.size}")
 
     adam_state = new_adam_state(model)
     best_score = -1.0
     best_loss = float("inf")
     best_parameters = model.clone_parameters()
-    best_predictions = np.zeros_like(val_labels)
-    best_accuracy = 0.0
     stale_epochs = 0
     step = 0
 
@@ -288,42 +291,46 @@ def train(epochs: int) -> Path:
         val_loss, val_accuracy, val_predictions = evaluate(model, val_inputs, val_labels, weights)
         score = macro_recall(val_labels, val_predictions)
         print(
-            f"эпоха {epoch:02d}  train {train_loss:.4f}  val {val_loss:.4f}  "
+            f"epoch {epoch:02d}  train {train_loss:.4f}  val {val_loss:.4f}  "
             f"accuracy {val_accuracy:.3f}  macro {score:.3f}"
         )
         improved = score > best_score or (score == best_score and val_loss < best_loss)
         if improved:
             best_score = score
             best_loss = val_loss
-            best_accuracy = val_accuracy
             best_parameters = model.clone_parameters()
-            best_predictions = val_predictions.copy()
             stale_epochs = 0
             continue
         stale_epochs += 1
         if stale_epochs >= PATIENCE:
-            print(f"остановка на эпохе {epoch}: проверка не улучшалась {PATIENCE} эпох")
+            print(f"stopped at epoch {epoch}: validation did not improve for {PATIENCE} epochs")
             break
 
     model.restore(best_parameters)
     weights_path = default_weights_path()
     save_checkpoint(weights_path, model, mean, std, IMAGE_SIZE, CLASS_NAMES)
 
-    recalls = per_class_recall(val_labels, best_predictions)
-    print(f"лучшая проверка: loss {best_loss:.4f}, accuracy {best_accuracy:.3f}, macro {best_score:.3f}")
+    print("loading test...")
+    test_images, test_labels = load_images(test_samples, IMAGE_SIZE)
+    test_inputs = flatten(normalize(test_images, mean, std))
+    test_loss, test_accuracy, test_predictions = evaluate(model, test_inputs, test_labels, weights)
+    test_score = macro_recall(test_labels, test_predictions)
+    recalls = per_class_recall(test_labels, test_predictions)
+    print(f"test: {len(test_samples)} ({format_counts(class_counts(test_labels))})")
+    print(f"test: loss {test_loss:.4f}, accuracy {test_accuracy:.3f}, macro {test_score:.3f}")
     for name, recall in zip(CLASS_NAMES, recalls):
         print(f"  {name}: recall {recall:.3f}")
-    print(f"веса: {weights_path}")
+    print(f"weights: {weights_path}")
     return weights_path
 
 
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
-    parser = argparse.ArgumentParser(description="Обучить классификатор человек / транспорт / животное")
+    parser = argparse.ArgumentParser(description="Train a person / vehicle / animal classifier")
     parser.add_argument("--epochs", type=int, default=EPOCHS)
     args = parser.parse_args()
     if args.epochs < 1:
-        raise SystemExit("epochs должен быть больше нуля")
+        raise SystemExit("epochs must be greater than zero")
     train(args.epochs)
 
 

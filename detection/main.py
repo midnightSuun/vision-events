@@ -1,4 +1,4 @@
-"""detection-service: кадр из MinIO → класс и рамка модели → Postgres и detection_completed."""
+"""detection-service: frame from MinIO → model class and box → Postgres and detection_completed."""
 
 from __future__ import annotations
 
@@ -46,13 +46,13 @@ def _is_image(key: str) -> bool:
 
 
 def frame_refs(raw: bytes | None) -> list[FrameRef]:
-    """Достаёт bucket и object.key из уведомления MinIO."""
+    """Reads bucket and object.key from a MinIO notification."""
     if not raw:
         return []
     try:
         payload = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError):
-        logger.warning("сообщение не json, пропуск")
+        logger.warning("message is not json, skipping")
         return []
     if not isinstance(payload, dict):
         return []
@@ -90,7 +90,7 @@ def _record_ref(record: object) -> FrameRef | None:
 
 
 def _key_field_refs(raw_key: object) -> list[FrameRef]:
-    """Запасной формат MinIO: Key = bucket/object-key."""
+    """Fallback MinIO format: Key = bucket/object-key."""
     if not isinstance(raw_key, str) or "/" not in raw_key:
         return []
     bucket, key = raw_key.split("/", 1)
@@ -102,7 +102,7 @@ def _key_field_refs(raw_key: object) -> list[FrameRef]:
 
 
 def frame_identity(key: str) -> tuple[str, str]:
-    """Первый каталог ключа — camera_id, имя файла без расширения — frame_id.
+    """The first directory of the key is camera_id; the filename without its extension is frame_id.
 
     cam-1/frame-9.jpg → camera cam-1, frame frame-9.
     frame-9.jpg → camera unknown, frame frame-9.
@@ -152,7 +152,7 @@ def ensure_topic(bootstrap: str, topic: str) -> None:
         if code == KafkaError.TOPIC_ALREADY_EXISTS:
             return
         raise
-    logger.info("создан топик %s", topic)
+    logger.info("created topic %s", topic)
 
 
 def wait_for_postgres(database_url: str, should_continue: Callable[[], bool]) -> bool:
@@ -164,7 +164,7 @@ def wait_for_postgres(database_url: str, should_continue: Callable[[], bool]) ->
                     cur.execute("SELECT 1")
             return True
         except psycopg.Error as exc:
-            logger.warning("postgres недоступен: %s", exc)
+            logger.warning("postgres unavailable: %s", exc)
             if not sleep_while(should_continue, delay):
                 return False
             delay = min(delay * 2, 10.0)
@@ -190,7 +190,7 @@ def insert_detection(
             )
             row = cur.fetchone()
         if row is None:
-            raise RuntimeError("postgres не вернул id детекции")
+            raise RuntimeError("postgres did not return a detection id")
         return int(row[0]), row[1]
 
 
@@ -209,7 +209,7 @@ def publish_detection(producer: Producer, topic: str, event: dict[str, object]) 
     )
     leftover = producer.flush(10.0)
     if leftover or errors:
-        detail = errors[0] if errors else f"в очереди осталось {leftover}"
+        detail = errors[0] if errors else f"{leftover} messages left in the queue"
         raise RuntimeError(detail)
 
 
@@ -244,25 +244,25 @@ def process_frame(
     detection_topic: str,
     should_continue: Callable[[], bool],
 ) -> bool:
-    """Возвращает False, если сервис остановили до записи и публикацию нельзя подтвердить."""
+    """Returns False if the service stopped before the write, so the publish cannot be confirmed."""
     if not _is_image(frame.key):
-        logger.info("пропуск %s/%s: не jpg, jpeg или png", frame.bucket, frame.key)
+        logger.info("skipping %s/%s: not jpg, jpeg, or png", frame.bucket, frame.key)
         return True
     try:
         body = download_frame(client, frame)
     except S3Error as exc:
-        logger.error("не удалось скачать %s/%s: %s", frame.bucket, frame.key, exc)
+        logger.error("failed to download %s/%s: %s", frame.bucket, frame.key, exc)
         return True
     try:
         prediction = classifier.classify(body)
     except (UnidentifiedImageError, OSError, ValueError) as exc:
-        logger.error("не удалось разобрать %s/%s: %s", frame.bucket, frame.key, exc)
+        logger.error("failed to decode %s/%s: %s", frame.bucket, frame.key, exc)
         return True
 
     camera_id, frame_id = frame_identity(frame.key)
     payload = prediction.as_dict()
     logger.info(
-        "кадр %s/%s (%s байт): %s (%s)",
+        "frame %s/%s (%s bytes): %s (%s)",
         frame.bucket,
         frame.key,
         len(body),
@@ -290,13 +290,13 @@ def process_frame(
                 },
             )
         except (psycopg.Error, RuntimeError, KafkaException, BufferError) as exc:
-            logger.error("не удалось записать %s/%s: %s", frame.bucket, frame.key, exc)
+            logger.error("failed to store %s/%s: %s", frame.bucket, frame.key, exc)
             if not sleep_while(should_continue, delay):
                 return False
             delay = min(delay * 2, 30.0)
             continue
         logger.info(
-            "детекция %s для %s/%s отправлена в %s",
+            "detection %s for %s/%s published to %s",
             detection_id,
             frame.bucket,
             frame.key,
@@ -327,7 +327,7 @@ def main() -> None:
     def handle_stop(signum: int, _frame: object) -> None:
         nonlocal running
         running = False
-        logger.info("остановка по сигналу %s", signum)
+        logger.info("stopping on signal %s", signum)
 
     signal.signal(signal.SIGTERM, handle_stop)
     signal.signal(signal.SIGINT, handle_stop)
@@ -335,9 +335,9 @@ def main() -> None:
     try:
         classifier = Classifier(weights)
     except FileNotFoundError:
-        logger.error("веса не найдены: %s", weights)
+        logger.error("weights not found: %s", weights)
         return
-    logger.info("модель загружена, классы: %s", ", ".join(classifier.class_names))
+    logger.info("model loaded, classes: %s", ", ".join(classifier.class_names))
 
     producer = Producer(
         {
@@ -363,7 +363,7 @@ def main() -> None:
         )
         consumer.subscribe([topic])
         logger.info(
-            "группа %s читает топик %s (%s), кадры из %s, результат в %s",
+            "group %s reads topic %s (%s), frames from %s, result to %s",
             group_id,
             topic,
             bootstrap,
@@ -381,7 +381,7 @@ def main() -> None:
                 raise KafkaException(error)
             refs = frame_refs(message.value())
             if not refs:
-                logger.warning("в сообщении нет bucket и object.key, offset=%s", message.offset())
+                logger.warning("message has no bucket and object.key, offset=%s", message.offset())
                 consumer.commit(message=message)
                 continue
             stored = True

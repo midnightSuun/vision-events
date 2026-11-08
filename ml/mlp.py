@@ -1,4 +1,4 @@
-"""Трёхслойный классификатор на NumPy."""
+"""Three-layer classifier in NumPy."""
 
 from pathlib import Path
 
@@ -121,7 +121,7 @@ def verify_gradients(seed: int = 0) -> None:
             numerical = (loss_plus - loss_minus) / (2 * epsilon)
             analytical = gradient[unravel].item()
             if not np.isclose(numerical, analytical, rtol=1e-4, atol=1e-6):
-                raise RuntimeError(f"градиент {name} не сошёлся: аналитический {analytical}, численный {numerical}")
+                raise RuntimeError(f"gradient {name} did not match: analytical {analytical}, numerical {numerical}")
 
 
 def new_adam_state(model: Mlp) -> dict[str, dict[str, np.ndarray | float]]:

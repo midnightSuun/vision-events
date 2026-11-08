@@ -1,8 +1,8 @@
-"""Классификация одного кадра загруженными весами.
+"""Classify one frame with loaded weights.
 
-Сеть относит весь кадр к одному из классов и не предсказывает положение объекта.
-Поэтому в objects одна детекция: класс-победитель, его confidence и рамка на весь кадр.
-bbox — доли кадра от 0 до 1: x, y левого верхнего угла, width и height.
+The network assigns the whole frame to one class and does not predict object location.
+So objects holds a single detection: the winning class, its confidence, and a box over the whole frame.
+bbox is frame fractions from 0 to 1: x and y of the top-left corner, plus width and height.
 """
 
 from pathlib import Path
@@ -32,7 +32,7 @@ class Detection(NamedTuple):
     bbox: BBox
 
 
-# Вся площадь кадра. Другой рамки эта сеть выдать не может.
+# The whole frame area. This network cannot emit any other box.
 FULL_FRAME_BBOX = BBox(0.0, 0.0, 1.0, 1.0)
 
 

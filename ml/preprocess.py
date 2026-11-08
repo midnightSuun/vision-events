@@ -1,4 +1,4 @@
-"""Подготовка изображения к входу сети."""
+"""Prepare an image for the network input."""
 
 from io import BytesIO
 from pathlib import Path
