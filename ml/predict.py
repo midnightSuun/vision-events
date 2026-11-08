@@ -39,8 +39,12 @@ def predict(image_path: Path, weights_path: Path) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Classify an image with the trained model")
-    parser.add_argument("image", type=Path, help="path to a jpg, png, or other image file")
+    parser = argparse.ArgumentParser(
+        description="Classify an image with the trained model"
+    )
+    parser.add_argument(
+        "image", type=Path, help="path to a jpg, png, or other image file"
+    )
     parser.add_argument("--weights", type=Path, default=default_weights_path())
     args = parser.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")

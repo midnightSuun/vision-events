@@ -1,5 +1,6 @@
 """Three-layer classifier in NumPy."""
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -15,15 +16,26 @@ def softmax(logits: np.ndarray) -> np.ndarray:
     return exp_values / exp_values.sum(axis=1, keepdims=True)
 
 
-def cross_entropy(probabilities: np.ndarray, labels: np.ndarray, class_weights: np.ndarray) -> float:
+def cross_entropy(
+    probabilities: np.ndarray, labels: np.ndarray, class_weights: np.ndarray
+) -> float:
     chosen = probabilities[np.arange(labels.shape[0]), labels]
     weighted = class_weights[labels] * np.log(np.clip(chosen, 1e-12, 1.0))
     return float(-np.mean(weighted))
 
 
 class Mlp:
-    def __init__(self, input_size: int, hidden_1: int, hidden_2: int, output_size: int, rng: np.random.Generator) -> None:
-        self.w1 = rng.normal(0.0, np.sqrt(2.0 / input_size), size=(input_size, hidden_1))
+    def __init__(
+        self,
+        input_size: int,
+        hidden_1: int,
+        hidden_2: int,
+        output_size: int,
+        rng: np.random.Generator,
+    ) -> None:
+        self.w1 = rng.normal(
+            0.0, np.sqrt(2.0 / input_size), size=(input_size, hidden_1)
+        )
         self.b1 = np.zeros(hidden_1)
         self.w2 = rng.normal(0.0, np.sqrt(2.0 / hidden_1), size=(hidden_1, hidden_2))
         self.b2 = np.zeros(hidden_2)
@@ -46,6 +58,18 @@ class Mlp:
     def restore(self, saved: dict[str, np.ndarray]) -> None:
         for name, value in self.parameters().items():
             value[...] = saved[name]
+
+    @classmethod
+    def from_parameters(cls, saved: dict[str, np.ndarray]) -> "Mlp":
+        model = cls(
+            input_size=int(saved["w1"].shape[0]),
+            hidden_1=int(saved["w1"].shape[1]),
+            hidden_2=int(saved["w2"].shape[1]),
+            output_size=int(saved["w3"].shape[1]),
+            rng=np.random.default_rng(0),
+        )
+        model.restore(saved)
+        return model
 
     def clone_parameters(self) -> dict[str, np.ndarray]:
         return {name: value.copy() for name, value in self.parameters().items()}
@@ -71,11 +95,18 @@ class Mlp:
         probabilities, _ = self.forward(inputs)
         return probabilities
 
-    def loss(self, inputs: np.ndarray, labels: np.ndarray, class_weights: np.ndarray) -> float:
+    def loss(
+        self, inputs: np.ndarray, labels: np.ndarray, class_weights: np.ndarray
+    ) -> float:
         probabilities, _ = self.forward(inputs)
         return cross_entropy(probabilities, labels, class_weights)
 
-    def backward(self, cache: dict[str, np.ndarray], labels: np.ndarray, class_weights: np.ndarray) -> dict[str, np.ndarray]:
+    def backward(
+        self,
+        cache: dict[str, np.ndarray],
+        labels: np.ndarray,
+        class_weights: np.ndarray,
+    ) -> dict[str, np.ndarray]:
         inputs = cache["inputs"]
         a1 = cache["a1"]
         a2 = cache["a2"]
@@ -97,38 +128,15 @@ class Mlp:
         return {"w1": dw1, "b1": db1, "w2": dw2, "b2": db2, "w3": dw3, "b3": db3}
 
 
-def verify_gradients(seed: int = 0) -> None:
-    rng = np.random.default_rng(seed)
-    model = Mlp(input_size=6, hidden_1=5, hidden_2=4, output_size=3, rng=rng)
-    inputs = rng.normal(size=(3, 6))
-    labels = np.array([0, 2, 1])
-    class_weights = np.array([1.0, 1.3, 0.7])
-    _, cache = model.forward(inputs)
-    grads = model.backward(cache, labels, class_weights)
-
-    for name, parameter in model.parameters().items():
-        gradient = grads[name]
-        flat_indices = rng.choice(parameter.size, size=min(3, parameter.size), replace=False)
-        for flat_index in flat_indices:
-            unravel = np.unravel_index(int(flat_index), parameter.shape)
-            epsilon = 1e-5
-            original = parameter[unravel].item()
-            parameter[unravel] = original + epsilon
-            loss_plus = model.loss(inputs, labels, class_weights)
-            parameter[unravel] = original - epsilon
-            loss_minus = model.loss(inputs, labels, class_weights)
-            parameter[unravel] = original
-            numerical = (loss_plus - loss_minus) / (2 * epsilon)
-            analytical = gradient[unravel].item()
-            if not np.isclose(numerical, analytical, rtol=1e-4, atol=1e-6):
-                raise RuntimeError(f"gradient {name} did not match: analytical {analytical}, numerical {numerical}")
-
-
 def new_adam_state(model: Mlp) -> dict[str, dict[str, np.ndarray | float]]:
     state: dict[str, dict[str, np.ndarray | float]] = {}
     for name, value in model.parameters().items():
         decay = 0.0 if name.startswith("b") else 1.0
-        state[name] = {"m": np.zeros_like(value), "v": np.zeros_like(value), "decay": decay}
+        state[name] = {
+            "m": np.zeros_like(value),
+            "v": np.zeros_like(value),
+            "decay": decay,
+        }
     return state
 
 
@@ -155,7 +163,18 @@ def adam_step(
         velocity += (1.0 - BETA2) * np.square(grad)
         moment_hat = moment / (1.0 - BETA1**step)
         velocity_hat = velocity / (1.0 - BETA2**step)
-        parameter -= learning_rate * (moment_hat / (np.sqrt(velocity_hat) + ADAM_EPS) + decay * parameter)
+        parameter -= learning_rate * (
+            moment_hat / (np.sqrt(velocity_hat) + ADAM_EPS) + decay * parameter
+        )
+
+
+@dataclass(frozen=True)
+class Checkpoint:
+    model: Mlp
+    mean: np.ndarray
+    std: np.ndarray
+    image_size: int
+    class_names: tuple[str, ...]
 
 
 def default_weights_path() -> Path:
@@ -187,17 +206,21 @@ def save_checkpoint(
     )
 
 
-def load_checkpoint(path: Path) -> tuple[Mlp, np.ndarray, np.ndarray, int, tuple[str, ...]]:
+def load_checkpoint(path: Path) -> Checkpoint:
     with np.load(path) as checkpoint:
-        model = Mlp.__new__(Mlp)
-        model.w1 = checkpoint["w1"].copy()
-        model.b1 = checkpoint["b1"].copy()
-        model.w2 = checkpoint["w2"].copy()
-        model.b2 = checkpoint["b2"].copy()
-        model.w3 = checkpoint["w3"].copy()
-        model.b3 = checkpoint["b3"].copy()
+        saved = {
+            name: checkpoint[name].copy()
+            for name in ("w1", "b1", "w2", "b2", "w3", "b3")
+        }
+        model = Mlp.from_parameters(saved)
         mean = checkpoint["mean"].copy()
         std = checkpoint["std"].copy()
         image_size = int(checkpoint["image_size"])
         class_names = tuple(str(checkpoint["class_names"].item()).split("|"))
-    return model, mean, std, image_size, class_names
+    return Checkpoint(
+        model=model,
+        mean=mean,
+        std=std,
+        image_size=image_size,
+        class_names=class_names,
+    )

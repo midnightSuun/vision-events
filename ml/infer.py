@@ -10,7 +10,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from mlp import Mlp, default_weights_path, load_checkpoint
+from mlp import default_weights_path, load_checkpoint
 from preprocess import flatten, normalize, rgb_from_bytes
 
 
@@ -71,12 +71,12 @@ class Classifier:
         path = default_weights_path() if weights_path is None else weights_path
         if not path.is_file():
             raise FileNotFoundError(path)
-        loaded = load_checkpoint(path)
-        self._model: Mlp = loaded[0]
-        self._mean: np.ndarray = loaded[1]
-        self._std: np.ndarray = loaded[2]
-        self._image_size: int = loaded[3]
-        self._class_names: tuple[str, ...] = loaded[4]
+        checkpoint = load_checkpoint(path)
+        self._model = checkpoint.model
+        self._mean = checkpoint.mean
+        self._std = checkpoint.std
+        self._image_size = checkpoint.image_size
+        self._class_names = checkpoint.class_names
 
     @property
     def class_names(self) -> tuple[str, ...]:
@@ -91,7 +91,9 @@ class Classifier:
             for name, probability in zip(self._class_names, probabilities, strict=True)
         )
         winner = scores[int(np.argmax(probabilities))]
-        detection = Detection(name=winner.name, confidence=winner.confidence, bbox=FULL_FRAME_BBOX)
+        detection = Detection(
+            name=winner.name, confidence=winner.confidence, bbox=FULL_FRAME_BBOX
+        )
         return FramePrediction(
             label=winner.name,
             confidence=winner.confidence,

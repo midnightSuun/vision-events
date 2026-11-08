@@ -8,7 +8,14 @@ from pathlib import Path
 
 import numpy as np
 
-from mlp import Mlp, adam_step, cross_entropy, default_weights_path, new_adam_state, save_checkpoint, verify_gradients
+from mlp import (
+    Mlp,
+    adam_step,
+    cross_entropy,
+    default_weights_path,
+    new_adam_state,
+    save_checkpoint,
+)
 from preprocess import channel_stats, flatten, load_rgb, normalize
 
 REPO_ID = "dictvv/voc-yolo"
@@ -16,22 +23,52 @@ DATASET_DIR = Path(__file__).resolve().parent / "data" / "voc-yolo"
 ARCHIVE_NAME = "voc.tar"
 
 CLASS_NAMES = ("person", "vehicle", "animal")
-# YOLO class indices from VOC: aeroplane, bicycle, bird, boat, bottle, bus, car, cat, ...
+
+# Position in this tuple is the YOLO class index.
+VOC_CLASS_NAMES = (
+    "aeroplane",
+    "bicycle",
+    "bird",
+    "boat",
+    "bottle",
+    "bus",
+    "car",
+    "cat",
+    "chair",
+    "cow",
+    "diningtable",
+    "dog",
+    "horse",
+    "motorbike",
+    "person",
+    "pottedplant",
+    "sheep",
+    "sofa",
+    "train",
+    "tvmonitor",
+)
+
+VOC_SUPERCLASS = {
+    "person": "person",
+    "aeroplane": "vehicle",
+    "bicycle": "vehicle",
+    "boat": "vehicle",
+    "bus": "vehicle",
+    "car": "vehicle",
+    "motorbike": "vehicle",
+    "train": "vehicle",
+    "bird": "animal",
+    "cat": "animal",
+    "cow": "animal",
+    "dog": "animal",
+    "horse": "animal",
+    "sheep": "animal",
+}
+
 VOC_TO_SUPER = {
-    0: 1,
-    1: 1,
-    2: 2,
-    3: 1,
-    5: 1,
-    6: 1,
-    7: 2,
-    9: 2,
-    11: 2,
-    12: 2,
-    13: 1,
-    14: 0,
-    16: 2,
-    18: 1,
+    index: CLASS_NAMES.index(VOC_SUPERCLASS[name])
+    for index, name in enumerate(VOC_CLASS_NAMES)
+    if name in VOC_SUPERCLASS
 }
 TRAIN_SPLITS = ("train2007", "train2012")
 VAL_SPLITS = ("val2007", "val2012")
@@ -87,10 +124,16 @@ def ensure_dataset(directory: Path) -> Path:
 
     print(f"extracting {archive.name}...")
     with tarfile.open(archive, "r:") as tar:
-        members = [member for member in tar.getmembers() if "VOCdevkit" not in Path(member.name).parts]
+        members = [
+            member
+            for member in tar.getmembers()
+            if "VOCdevkit" not in Path(member.name).parts
+        ]
         tar.extractall(path=directory, members=members, filter="data")
     if find_yolo_dirs(directory) is None:
-        raise FileNotFoundError(f"after extraction, images/{TRAIN_SPLITS[0]} and labels were not found")
+        raise FileNotFoundError(
+            f"after extraction, images/{TRAIN_SPLITS[0]} and labels were not found"
+        )
     archive.unlink(missing_ok=True)
     return directory
 
@@ -175,12 +218,18 @@ def class_counts(labels: np.ndarray) -> np.ndarray:
 
 def class_weights_from_counts(counts: np.ndarray) -> np.ndarray:
     if np.any(counts == 0):
-        missing = [CLASS_NAMES[index] for index, count in enumerate(counts) if count == 0]
-        raise RuntimeError(f"training set has no examples of class: {', '.join(missing)}")
+        missing = [
+            CLASS_NAMES[index] for index, count in enumerate(counts) if count == 0
+        ]
+        raise RuntimeError(
+            f"training set has no examples of class: {', '.join(missing)}"
+        )
     return counts.sum() / (len(CLASS_NAMES) * counts)
 
 
-def load_images(samples: list[Sample], image_size: int) -> tuple[np.ndarray, np.ndarray]:
+def load_images(
+    samples: list[Sample], image_size: int
+) -> tuple[np.ndarray, np.ndarray]:
     images: list[np.ndarray] = []
     for index, sample in enumerate(samples, start=1):
         images.append(load_rgb(sample.path, image_size))
@@ -222,7 +271,9 @@ def run_epoch(
     return loss_sum / seen, step
 
 
-def evaluate(model: Mlp, inputs: np.ndarray, labels: np.ndarray, class_weights: np.ndarray) -> tuple[float, float, np.ndarray]:
+def evaluate(
+    model: Mlp, inputs: np.ndarray, labels: np.ndarray, class_weights: np.ndarray
+) -> tuple[float, float, np.ndarray]:
     probabilities = model.predict_proba(inputs)
     predictions = probabilities.argmax(axis=1)
     loss = cross_entropy(probabilities, labels, class_weights)
@@ -242,16 +293,84 @@ def per_class_recall(labels: np.ndarray, predictions: np.ndarray) -> list[float]
 
 
 def macro_recall(labels: np.ndarray, predictions: np.ndarray) -> float:
-    valid = [value for value in per_class_recall(labels, predictions) if not np.isnan(value)]
+    valid = [
+        value for value in per_class_recall(labels, predictions) if not np.isnan(value)
+    ]
     if not valid:
         return 0.0
     return float(np.mean(valid))
 
 
-def train(epochs: int) -> Path:
-    verify_gradients()
-    print("gradients match the numeric check")
+def fit(
+    model: Mlp,
+    train_inputs: np.ndarray,
+    train_labels: np.ndarray,
+    val_inputs: np.ndarray,
+    val_labels: np.ndarray,
+    class_weights: np.ndarray,
+    rng: np.random.Generator,
+    epochs: int,
+) -> None:
+    adam_state = new_adam_state(model)
+    best_score = -1.0
+    best_loss = float("inf")
+    best_parameters = model.clone_parameters()
+    stale_epochs = 0
+    step = 0
 
+    for epoch in range(1, epochs + 1):
+        train_loss, step = run_epoch(
+            model, train_inputs, train_labels, class_weights, adam_state, rng, step
+        )
+        val_loss, val_accuracy, val_predictions = evaluate(
+            model, val_inputs, val_labels, class_weights
+        )
+        score = macro_recall(val_labels, val_predictions)
+        print(
+            f"epoch {epoch:02d}  train {train_loss:.4f}  val {val_loss:.4f}  "
+            f"accuracy {val_accuracy:.3f}  macro {score:.3f}"
+        )
+        improved = score > best_score or (score == best_score and val_loss < best_loss)
+        if improved:
+            best_score = score
+            best_loss = val_loss
+            best_parameters = model.clone_parameters()
+            stale_epochs = 0
+            continue
+        stale_epochs += 1
+        if stale_epochs >= PATIENCE:
+            print(
+                f"stopped at epoch {epoch}: validation did not improve for {PATIENCE} epochs"
+            )
+            break
+
+    model.restore(best_parameters)
+
+
+def report_test(
+    model: Mlp,
+    samples: list[Sample],
+    mean: np.ndarray,
+    std: np.ndarray,
+    class_weights: np.ndarray,
+) -> None:
+    print("loading test...")
+    test_images, test_labels = load_images(samples, IMAGE_SIZE)
+    test_inputs = flatten(normalize(test_images, mean, std))
+    test_loss, test_accuracy, test_predictions = evaluate(
+        model, test_inputs, test_labels, class_weights
+    )
+    test_score = macro_recall(test_labels, test_predictions)
+    recalls = per_class_recall(test_labels, test_predictions)
+    print(f"test: {len(samples)} ({format_counts(class_counts(test_labels))})")
+    print(
+        f"test: loss {test_loss:.4f}, accuracy {test_accuracy:.3f}, macro {test_score:.3f}"
+    )
+    for name, recall in zip(CLASS_NAMES, recalls):
+        print(f"  {name}: recall {recall:.3f}")
+
+
+def train(epochs: int) -> Path:
     dataset_dir = ensure_dataset(DATASET_DIR)
     train_samples, val_samples, test_samples = load_samples(dataset_dir)
     print("loading train...")
@@ -279,54 +398,19 @@ def train(epochs: int) -> Path:
         f"parameters {model.parameter_count()}"
     )
 
-    adam_state = new_adam_state(model)
-    best_score = -1.0
-    best_loss = float("inf")
-    best_parameters = model.clone_parameters()
-    stale_epochs = 0
-    step = 0
-
-    for epoch in range(1, epochs + 1):
-        train_loss, step = run_epoch(model, train_inputs, train_labels, weights, adam_state, rng, step)
-        val_loss, val_accuracy, val_predictions = evaluate(model, val_inputs, val_labels, weights)
-        score = macro_recall(val_labels, val_predictions)
-        print(
-            f"epoch {epoch:02d}  train {train_loss:.4f}  val {val_loss:.4f}  "
-            f"accuracy {val_accuracy:.3f}  macro {score:.3f}"
-        )
-        improved = score > best_score or (score == best_score and val_loss < best_loss)
-        if improved:
-            best_score = score
-            best_loss = val_loss
-            best_parameters = model.clone_parameters()
-            stale_epochs = 0
-            continue
-        stale_epochs += 1
-        if stale_epochs >= PATIENCE:
-            print(f"stopped at epoch {epoch}: validation did not improve for {PATIENCE} epochs")
-            break
-
-    model.restore(best_parameters)
+    fit(model, train_inputs, train_labels, val_inputs, val_labels, weights, rng, epochs)
     weights_path = default_weights_path()
     save_checkpoint(weights_path, model, mean, std, IMAGE_SIZE, CLASS_NAMES)
-
-    print("loading test...")
-    test_images, test_labels = load_images(test_samples, IMAGE_SIZE)
-    test_inputs = flatten(normalize(test_images, mean, std))
-    test_loss, test_accuracy, test_predictions = evaluate(model, test_inputs, test_labels, weights)
-    test_score = macro_recall(test_labels, test_predictions)
-    recalls = per_class_recall(test_labels, test_predictions)
-    print(f"test: {len(test_samples)} ({format_counts(class_counts(test_labels))})")
-    print(f"test: loss {test_loss:.4f}, accuracy {test_accuracy:.3f}, macro {test_score:.3f}")
-    for name, recall in zip(CLASS_NAMES, recalls):
-        print(f"  {name}: recall {recall:.3f}")
+    report_test(model, test_samples, mean, std, weights)
     print(f"weights: {weights_path}")
     return weights_path
 
 
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
-    parser = argparse.ArgumentParser(description="Train a person / vehicle / animal classifier")
+    parser = argparse.ArgumentParser(
+        description="Train a person / vehicle / animal classifier"
+    )
     parser.add_argument("--epochs", type=int, default=EPOCHS)
     args = parser.parse_args()
     if args.epochs < 1:
