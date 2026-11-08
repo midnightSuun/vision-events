@@ -1,0 +1,2 @@
+confluent-kafka==2.16.1
+minio==7.2.20
