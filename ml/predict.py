@@ -4,35 +4,37 @@ import argparse
 import sys
 from pathlib import Path
 
-import numpy as np
 from PIL import UnidentifiedImageError
 
-from mlp import default_weights_path, load_checkpoint
-from preprocess import flatten, load_rgb, normalize
+from infer import Classifier
+from mlp import default_weights_path
 
 
 def predict(image_path: Path, weights_path: Path) -> int:
     if not image_path.is_file():
         print(f"файл не найден: {image_path}")
         return 1
-    if not weights_path.is_file():
+    try:
+        classifier = Classifier(weights_path)
+    except FileNotFoundError:
         print("веса не найдены. Сначала запусти: python ml/train.py")
         return 1
-
-    model, mean, std, image_size, class_names = load_checkpoint(weights_path)
     try:
-        image = load_rgb(image_path, image_size)
+        prediction = classifier.classify(image_path.read_bytes())
     except (UnidentifiedImageError, OSError):
         print(f"не удалось прочитать изображение: {image_path}")
         return 1
-    features = flatten(normalize(image, mean, std))
-    probabilities = model.predict_proba(features)[0]
 
     print(image_path)
-    for name, probability in zip(class_names, probabilities):
-        print(f"{name:<12} {probability:.3f}")
-    winner = class_names[int(np.argmax(probabilities))]
-    print(f"ответ: {winner}")
+    for item in prediction.classes:
+        print(f"{item.name:<12} {item.confidence:.3f}")
+    print(f"ответ: {prediction.label}")
+    for item in prediction.objects:
+        box = item.bbox
+        print(
+            f"объект: {item.name} {item.confidence:.3f}  "
+            f"bbox x={box.x:.3f} y={box.y:.3f} w={box.width:.3f} h={box.height:.3f}"
+        )
     return 0
 
 

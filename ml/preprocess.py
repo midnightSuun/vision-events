@@ -1,17 +1,27 @@
 """Подготовка изображения к входу сети."""
 
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 
+def _rgb_array(image: Image.Image, image_size: int) -> np.ndarray:
+    converted = image.convert("RGB")
+    resized = converted.resize((image_size, image_size), Image.Resampling.BILINEAR)
+    pixels = np.asarray(resized, dtype=np.float64)
+    return pixels / 255.0
+
+
 def load_rgb(path: Path, image_size: int) -> np.ndarray:
     with Image.open(path) as image:
-        converted = image.convert("RGB")
-        resized = converted.resize((image_size, image_size), Image.Resampling.BILINEAR)
-        pixels = np.asarray(resized, dtype=np.float64)
-    return pixels / 255.0
+        return _rgb_array(image, image_size)
+
+
+def rgb_from_bytes(data: bytes, image_size: int) -> np.ndarray:
+    with Image.open(BytesIO(data)) as image:
+        return _rgb_array(image, image_size)
 
 
 def channel_stats(images: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

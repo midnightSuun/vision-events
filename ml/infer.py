@@ -1,0 +1,100 @@
+"""Классификация одного кадра загруженными весами.
+
+Сеть относит весь кадр к одному из классов и не предсказывает положение объекта.
+Поэтому в objects одна детекция: класс-победитель, его confidence и рамка на весь кадр.
+bbox — доли кадра от 0 до 1: x, y левого верхнего угла, width и height.
+"""
+
+from pathlib import Path
+from typing import NamedTuple
+
+import numpy as np
+
+from mlp import Mlp, default_weights_path, load_checkpoint
+from preprocess import flatten, normalize, rgb_from_bytes
+
+
+class ClassScore(NamedTuple):
+    name: str
+    confidence: float
+
+
+class BBox(NamedTuple):
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+class Detection(NamedTuple):
+    name: str
+    confidence: float
+    bbox: BBox
+
+
+# Вся площадь кадра. Другой рамки эта сеть выдать не может.
+FULL_FRAME_BBOX = BBox(0.0, 0.0, 1.0, 1.0)
+
+
+class FramePrediction(NamedTuple):
+    label: str
+    confidence: float
+    classes: tuple[ClassScore, ...]
+    objects: tuple[Detection, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "label": self.label,
+            "confidence": self.confidence,
+            "classes": [
+                {"name": item.name, "confidence": item.confidence}
+                for item in self.classes
+            ],
+            "objects": [
+                {
+                    "class": item.name,
+                    "confidence": item.confidence,
+                    "bbox": {
+                        "x": item.bbox.x,
+                        "y": item.bbox.y,
+                        "width": item.bbox.width,
+                        "height": item.bbox.height,
+                    },
+                }
+                for item in self.objects
+            ],
+        }
+
+
+class Classifier:
+    def __init__(self, weights_path: Path | None = None) -> None:
+        path = default_weights_path() if weights_path is None else weights_path
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        loaded = load_checkpoint(path)
+        self._model: Mlp = loaded[0]
+        self._mean: np.ndarray = loaded[1]
+        self._std: np.ndarray = loaded[2]
+        self._image_size: int = loaded[3]
+        self._class_names: tuple[str, ...] = loaded[4]
+
+    @property
+    def class_names(self) -> tuple[str, ...]:
+        return self._class_names
+
+    def classify(self, image: bytes) -> FramePrediction:
+        pixels = rgb_from_bytes(image, self._image_size)
+        features = flatten(normalize(pixels, self._mean, self._std))
+        probabilities = self._model.predict_proba(features)[0]
+        scores = tuple(
+            ClassScore(name, round(float(probability), 6))
+            for name, probability in zip(self._class_names, probabilities, strict=True)
+        )
+        winner = scores[int(np.argmax(probabilities))]
+        detection = Detection(name=winner.name, confidence=winner.confidence, bbox=FULL_FRAME_BBOX)
+        return FramePrediction(
+            label=winner.name,
+            confidence=winner.confidence,
+            classes=scores,
+            objects=(detection,),
+        )
