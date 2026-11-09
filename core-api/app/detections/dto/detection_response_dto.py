@@ -1,17 +1,10 @@
-"""Generated from the live Postgres schema. Do not edit by hand.
-
-Regenerate after a migration:
-
-    uv run python scripts/generate_models.py
-"""
-
 from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel
 
 
-class Detections(BaseModel):
+class DetectionResponseDto(BaseModel):
     id: int
     frame_id: str
     camera_id: str

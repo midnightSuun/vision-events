@@ -1,2 +1,5 @@
 [lint.isort]
 known-first-party = ["app"]
+
+[lint.per-file-ignores]
+"app/models.py" = ["I001"]

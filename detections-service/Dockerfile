@@ -6,13 +6,14 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
+    UV_NO_DEV=1 \
     PYTHONPATH=/app:/app/ml \
     MODEL_WEIGHTS=/app/ml/artifacts/model.npz
 
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen
+RUN uv sync --frozen --no-dev
 
 COPY app ./app
 RUN mkdir -p /app/ml/artifacts
