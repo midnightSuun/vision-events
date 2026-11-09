@@ -167,6 +167,40 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  # One camera path in, many readers out. The frame grabber is a reader.
+  mediamtx:
+    image: bluenviron/mediamtx:1.21.3
+    command: ["/mediamtx.yml"]
+    ports:
+      - "8554:8554"
+      - "8889:8889"
+      - "8189:8189/udp"
+      - "9997:9997"
+    volumes:
+      - ./mediamtx/mediamtx.yml:/mediamtx.yml:ro
+
+  # Samples each published path at FRAME_FPS and stores JPEG in the frames bucket.
+  frame-grabber:
+    build:
+      context: ../frame-grabber
+    environment:
+      MTX_API_URL: http://mediamtx:9997
+      MTX_RTSP_BASE: rtsp://mediamtx:8554
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_SECURE: "false"
+      MINIO_BUCKET: frames
+      FRAME_FPS: "1"
+    depends_on:
+      mediamtx:
+        condition: service_started
+      minio:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   # Classifies a frame from frame_created and stores the row.
   # ml is mounted, not copied: this directory is the build context, and ml/data is large.
   detections-service:

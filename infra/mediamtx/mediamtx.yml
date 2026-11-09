@@ -1,0 +1,29 @@
+# One published path is one camera. Readers (the frame grabber, a browser)
+# connect to MediaMTX, never back to the camera.
+#
+# From the host, TCP only, because Docker Desktop does not pass RTSP UDP through:
+# ffmpeg -f dshow -i video="Integrated Camera" -c:v libx264 -profile:v baseline -pix_fmt yuv420p -preset ultrafast -tune zerolatency -g 30 -f rtsp -rtsp_transport tcp rtsp://localhost:8554/cam-1
+
+logLevel: info
+
+api: yes
+apiAddress: :9997
+
+rtspAddress: :8554
+rtspTransports: [tcp]
+
+webrtcAddress: :8889
+webrtcAdditionalHosts: [127.0.0.1]
+
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+      - action: read
+      - action: playback
+      - action: api
+
+paths:
+  all_others:
