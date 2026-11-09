@@ -44,13 +44,20 @@ services:
     image: postgres:17
     ports:
       - "5432:5432"
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=4
+      - -c
+      - max_replication_slots=4
     environment:
       POSTGRES_USER: vision
       POSTGRES_PASSWORD: vision
       POSTGRES_DB: vision
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./db/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U vision -d vision"]
       interval: 5s
@@ -117,12 +124,6 @@ services:
           --topic frame_created \
           --partitions 1 \
           --replication-factor 1
-        /opt/kafka/bin/kafka-topics.sh \
-          --bootstrap-server kafka:19092 \
-          --create --if-not-exists \
-          --topic detection_completed \
-          --partitions 1 \
-          --replication-factor 1
         mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
         mc mb --ignore-existing local/frames
         # mc's "put" filter is s3:ObjectCreated:*. A normal upload is published
@@ -137,22 +138,55 @@ services:
         echo "bucket notification was not accepted" >&2
         exit 1
 
-  # Classifies a frame from frame_created, stores it, publishes detection_completed.
-  detection-service:
+  dbmate:
+    image: ghcr.io/amacneil/dbmate
+    volumes:
+      - ../db/migrations:/db/migrations:ro
+      - ../db/dbmate-config:/db/dbmate-config:ro
+    command: ["--env-file", "/db/dbmate-config", "up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # Streams inserts and updates from Postgres into Kafka. The services share one
+  # database, so Debezium is the only publisher of those changes.
+  debezium:
+    image: quay.io/debezium/server:3.7.1.Final
+    ports:
+      - "8089:8080"
+    volumes:
+      - ./debezium:/debezium/config:ro
+      - debezium_data:/debezium/data
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      dbmate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Classifies a frame from frame_created and stores the row.
+  # ml is mounted, not copied: this directory is the build context, and ml/data is large.
+  detections-service:
     build:
-      context: .
-      dockerfile: detection/Dockerfile
+      context: ../detections-service
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
       KAFKA_TOPIC: frame_created
-      KAFKA_DETECTION_TOPIC: detection_completed
       KAFKA_GROUP_ID: detection-service
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
       MINIO_SECURE: "false"
       MODEL_WEIGHTS: /app/ml/artifacts/model.npz
+      PYTHONPATH: /app:/app/ml
       DATABASE_URL: postgresql://vision:vision@postgres:5432/vision
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../ml:/app/ml:ro
     depends_on:
       kafka:
         condition: service_healthy
@@ -162,8 +196,25 @@ services:
         condition: service_healthy
       init:
         condition: service_completed_successfully
+      dbmate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  core-api:
+    build:
+      context: ../core-api
+    environment:
+      DATABASE_URL: postgresql://vision:vision@postgres:5432/vision
+    ports:
+      - "8001:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dbmate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
 volumes:
   minio_data:
   postgres_data:
+  debezium_data:

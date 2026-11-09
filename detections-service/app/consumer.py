@@ -1,12 +1,18 @@
-"""detection-service: frame from MinIO → model class and box → Postgres and detection_completed."""
+"""detection-service: frame from MinIO → model class and box → Postgres.
+
+The row is the event. Debezium reads the Postgres log and publishes it to Kafka,
+so this service does not write to Kafka itself.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import signal
 import sys
+import threading
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -15,8 +21,7 @@ from typing import NamedTuple
 from urllib.parse import unquote_plus
 
 import psycopg
-from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
-from confluent_kafka.admin import AdminClient, NewTopic
+from aiokafka import AIOKafkaConsumer
 from minio import Minio
 from minio.error import S3Error
 from PIL import UnidentifiedImageError
@@ -36,6 +41,12 @@ logger = logging.getLogger("detection-service")
 class FrameRef(NamedTuple):
     bucket: str
     key: str
+
+
+class PreparedFrame(NamedTuple):
+    camera_id: str
+    frame_id: str
+    payload: dict[str, object]
 
 
 _IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png")
@@ -138,23 +149,6 @@ def minio_client() -> Minio:
     )
 
 
-def ensure_topic(bootstrap: str, topic: str) -> None:
-    admin = AdminClient({"bootstrap.servers": bootstrap})
-    future = admin.create_topics(
-        [NewTopic(topic, num_partitions=1, replication_factor=1)],
-        request_timeout=30,
-    )[topic]
-    try:
-        future.result()
-    except KafkaException as exc:
-        error = exc.args[0] if exc.args else None
-        code = error.code() if isinstance(error, KafkaError) else None
-        if code == KafkaError.TOPIC_ALREADY_EXISTS:
-            return
-        raise
-    logger.info("created topic %s", topic)
-
-
 def wait_for_postgres(database_url: str, should_continue: Callable[[], bool]) -> bool:
     delay = 1.0
     while should_continue():
@@ -194,29 +188,17 @@ def insert_detection(
         return int(row[0]), row[1]
 
 
-def publish_detection(producer: Producer, topic: str, event: dict[str, object]) -> None:
-    errors: list[str] = []
-
-    def on_delivery(err: KafkaError | None, _msg: object) -> None:
-        if err is not None:
-            errors.append(str(err))
-
-    producer.produce(
-        topic,
-        key=str(event["camera_id"]).encode("utf-8"),
-        value=json.dumps(event, ensure_ascii=False).encode("utf-8"),
-        on_delivery=on_delivery,
-    )
-    leftover = producer.flush(10.0)
-    if leftover or errors:
-        detail = errors[0] if errors else f"{leftover} messages left in the queue"
-        raise RuntimeError(detail)
-
-
 def sleep_while(should_continue: Callable[[], bool], seconds: float) -> bool:
     deadline = time.monotonic() + seconds
     while should_continue() and time.monotonic() < deadline:
         time.sleep(0.2)
+    return should_continue()
+
+
+async def async_sleep_while(should_continue: Callable[[], bool], seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while should_continue() and time.monotonic() < deadline:
+        await asyncio.sleep(0.2)
     return should_continue()
 
 
@@ -235,32 +217,23 @@ def _object_text(prediction: FramePrediction) -> str:
     return "; ".join(parts)
 
 
-def process_frame(
-    frame: FrameRef,
-    client: Minio,
-    classifier: Classifier,
-    producer: Producer,
-    database_url: str,
-    detection_topic: str,
-    should_continue: Callable[[], bool],
-) -> bool:
-    """Returns False if the service stopped before the write, so the publish cannot be confirmed."""
+def prepare_frame(frame: FrameRef, client: Minio, classifier: Classifier) -> PreparedFrame | None:
+    """Returns None when the object is not a frame the model can classify."""
     if not _is_image(frame.key):
         logger.info("skipping %s/%s: not jpg, jpeg, or png", frame.bucket, frame.key)
-        return True
+        return None
     try:
         body = download_frame(client, frame)
     except S3Error as exc:
         logger.error("failed to download %s/%s: %s", frame.bucket, frame.key, exc)
-        return True
+        return None
     try:
         prediction = classifier.classify(body)
     except (UnidentifiedImageError, OSError, ValueError) as exc:
         logger.error("failed to decode %s/%s: %s", frame.bucket, frame.key, exc)
-        return True
+        return None
 
     camera_id, frame_id = frame_identity(frame.key)
-    payload = prediction.as_dict()
     logger.info(
         "frame %s/%s (%s bytes): %s (%s)",
         frame.bucket,
@@ -269,47 +242,46 @@ def process_frame(
         _object_text(prediction),
         _class_text(prediction),
     )
+    return PreparedFrame(camera_id, frame_id, prediction.as_dict())
 
-    saved: tuple[int, datetime] | None = None
+
+async def process_frame(
+    frame: FrameRef,
+    client: Minio,
+    classifier: Classifier,
+    database_url: str,
+    should_continue: Callable[[], bool],
+) -> bool:
+    """Returns False if the service stopped before the row was stored."""
+    prepared = await asyncio.to_thread(prepare_frame, frame, client, classifier)
+    if prepared is None:
+        return True
+
     delay = 1.0
     while should_continue():
         try:
-            if saved is None:
-                saved = insert_detection(database_url, frame_id, camera_id, frame.key, payload)
-            detection_id, created_at = saved
-            publish_detection(
-                producer,
-                detection_topic,
-                {
-                    "id": detection_id,
-                    "frame_id": frame_id,
-                    "camera_id": camera_id,
-                    "object_key": frame.key,
-                    "detections": payload,
-                    "created_at": created_at.isoformat(),
-                },
+            detection_id, _created_at = await asyncio.to_thread(
+                insert_detection,
+                database_url,
+                prepared.frame_id,
+                prepared.camera_id,
+                frame.key,
+                prepared.payload,
             )
-        except (psycopg.Error, RuntimeError, KafkaException, BufferError) as exc:
+        except (psycopg.Error, RuntimeError) as exc:
             logger.error("failed to store %s/%s: %s", frame.bucket, frame.key, exc)
-            if not sleep_while(should_continue, delay):
+            if not await async_sleep_while(should_continue, delay):
                 return False
             delay = min(delay * 2, 30.0)
             continue
-        logger.info(
-            "detection %s for %s/%s published to %s",
-            detection_id,
-            frame.bucket,
-            frame.key,
-            detection_topic,
-        )
+        logger.info("stored detection %s for %s/%s", detection_id, frame.bucket, frame.key)
         return True
     return False
 
 
-def main() -> None:
+async def _consume(stop_event: threading.Event) -> None:
     bootstrap = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "kafka:19092")
     topic = os.environ.get("KAFKA_TOPIC", "frame_created")
-    detection_topic = os.environ.get("KAFKA_DETECTION_TOPIC", "detection_completed")
     group_id = os.environ.get("KAFKA_GROUP_ID", "detection-service")
     endpoint = os.environ.get("MINIO_ENDPOINT", "minio:9000")
     database_url = os.environ.get(
@@ -319,18 +291,8 @@ def main() -> None:
     weights = Path(os.environ.get("MODEL_WEIGHTS", "/app/ml/artifacts/model.npz"))
     client = minio_client()
 
-    running = True
-
     def should_continue() -> bool:
-        return running
-
-    def handle_stop(signum: int, _frame: object) -> None:
-        nonlocal running
-        running = False
-        logger.info("stopping on signal %s", signum)
-
-    signal.signal(signal.SIGTERM, handle_stop)
-    signal.signal(signal.SIGINT, handle_stop)
+        return not stop_event.is_set()
 
     try:
         classifier = Classifier(weights)
@@ -339,71 +301,87 @@ def main() -> None:
         return
     logger.info("model loaded, classes: %s", ", ".join(classifier.class_names))
 
-    producer = Producer(
-        {
-            "bootstrap.servers": bootstrap,
-            "client.id": f"{group_id}-publisher",
-            "acks": "all",
-            "message.timeout.ms": 10000,
-        }
+    if not await asyncio.to_thread(wait_for_postgres, database_url, should_continue):
+        return
+
+    consumer = AIOKafkaConsumer(
+        topic,
+        bootstrap_servers=bootstrap,
+        group_id=group_id,
+        client_id=group_id,
+        auto_offset_reset="earliest",
+        enable_auto_commit=False,
     )
-    consumer: Consumer | None = None
+    await consumer.start()
     try:
-        ensure_topic(bootstrap, detection_topic)
-        if not wait_for_postgres(database_url, should_continue):
-            return
-        consumer = Consumer(
-            {
-                "bootstrap.servers": bootstrap,
-                "group.id": group_id,
-                "client.id": group_id,
-                "auto.offset.reset": "earliest",
-                "enable.auto.commit": False,
-            }
-        )
-        consumer.subscribe([topic])
         logger.info(
-            "group %s reads topic %s (%s), frames from %s, result to %s",
+            "group %s reads topic %s (%s), frames from %s, rows go to postgres",
             group_id,
             topic,
             bootstrap,
             endpoint,
-            detection_topic,
         )
-        while running:
-            message = consumer.poll(1.0)
-            if message is None:
+        while should_continue():
+            batches = await consumer.getmany(timeout_ms=1000, max_records=1)
+            if not batches:
                 continue
-            error = message.error()
-            if error is not None:
-                if error.code() == KafkaError._PARTITION_EOF:
-                    continue
-                raise KafkaException(error)
-            refs = frame_refs(message.value())
-            if not refs:
-                logger.warning("message has no bucket and object.key, offset=%s", message.offset())
-                consumer.commit(message=message)
-                continue
-            stored = True
-            for frame in refs:
-                if not process_frame(
-                    frame,
-                    client,
-                    classifier,
-                    producer,
-                    database_url,
-                    detection_topic,
-                    should_continue,
-                ):
-                    stored = False
-                    break
-            if not stored:
-                break
-            consumer.commit(message=message)
+            for messages in batches.values():
+                for message in messages:
+                    refs = frame_refs(message.value)
+                    if not refs:
+                        logger.warning(
+                            "message has no bucket and object.key, offset=%s",
+                            message.offset,
+                        )
+                        await consumer.commit()
+                        continue
+                    stored = True
+                    for frame in refs:
+                        if not await process_frame(
+                            frame,
+                            client,
+                            classifier,
+                            database_url,
+                            should_continue,
+                        ):
+                            stored = False
+                            break
+                    if not stored:
+                        return
+                    await consumer.commit()
     finally:
-        if consumer is not None:
-            consumer.close()
-        producer.flush(5)
+        await consumer.stop()
+
+
+async def run_consumer(stop: threading.Event | None = None) -> None:
+    stop_event = threading.Event() if stop is None else stop
+    if stop is None:
+
+        def handle_stop(signum: int, _frame: object) -> None:
+            stop_event.set()
+            logger.info("stopping on signal %s", signum)
+
+        signal.signal(signal.SIGTERM, handle_stop)
+        signal.signal(signal.SIGINT, handle_stop)
+
+    delay = 1.0
+    while not stop_event.is_set():
+        try:
+            await _consume(stop_event)
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("consumer failed")
+            if stop_event.is_set():
+                return
+            if not await async_sleep_while(lambda: not stop_event.is_set(), delay):
+                return
+            delay = min(delay * 2, 30.0)
+
+
+def main() -> None:
+    asyncio.run(run_consumer())
 
 
 if __name__ == "__main__":

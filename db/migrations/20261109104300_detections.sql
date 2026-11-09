@@ -1,3 +1,5 @@
+-- migrate:up
+
 CREATE TABLE IF NOT EXISTS detections (
     id          bigserial PRIMARY KEY,
     frame_id    text        NOT NULL,
@@ -9,3 +11,7 @@ CREATE TABLE IF NOT EXISTS detections (
 
 CREATE INDEX IF NOT EXISTS detections_camera_created_at_idx
     ON detections (camera_id, created_at DESC);
+
+-- migrate:down
+
+DROP TABLE IF EXISTS detections;

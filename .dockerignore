@@ -1,9 +1,0 @@
-.git
-.venv
-backend
-data
-ml/data
-**/__pycache__
-**/*.pyc
-node_modules
-dist
