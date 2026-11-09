@@ -7,9 +7,18 @@ Regenerate after applying a dbmate migration:
 
 import datetime
 
-from sqlalchemy import BigInteger, DateTime, Index, PrimaryKeyConstraint, String, Text, text
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    Index,
+    PrimaryKeyConstraint,
+    String,
+    Text,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
 
 class Base(DeclarativeBase):
     pass

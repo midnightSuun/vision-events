@@ -1,6 +1,6 @@
 from functools import lru_cache
+from urllib.parse import urlparse, urlunparse
 
-from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,12 +18,10 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="allow")
 
-    @field_validator("MINIO_SECURE", mode="before")
-    @classmethod
-    def parse_minio_secure(cls, value: object) -> object:
-        if isinstance(value, str):
-            return value.lower() == "true"
-        return value
+    @property
+    def sqlalchemy_url(self) -> str:
+        parsed = urlparse(self.DATABASE_URL)
+        return urlunparse(parsed._replace(scheme="postgresql+asyncpg"))
 
 
 @lru_cache

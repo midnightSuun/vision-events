@@ -1,21 +1,28 @@
-"""Kafka loop. Each message is handled by DetectionsService.
+"""Kafka loop. A message becomes a frame, and DetectionService stores it.
 
 The row is the event. Debezium reads the Postgres log and publishes it to Kafka,
 so this service does not write to Kafka itself.
 """
-
-from __future__ import annotations
 
 import asyncio
 import logging
 import signal
 import sys
 import threading
+import time
+from collections.abc import Callable
+from pathlib import Path
 
 from aiokafka import AIOKafkaConsumer
+from minio import Minio
+from sqlalchemy.exc import SQLAlchemyError
 
-from app.detections.detections_service import DetectionsService, async_sleep_while
-from app.settings import get_settings
+from app.db import AsyncSessionLocal
+from app.detections.detections_repository import DetectionsRepository
+from app.detections.detections_service import DetectionService
+from app.detections.frames import frame_refs
+from app.settings import Settings, get_settings
+from infer import Classifier
 
 logging.basicConfig(
     level=get_settings().LOG_LEVEL,
@@ -26,16 +33,56 @@ logging.basicConfig(
 logger = logging.getLogger("detection-service")
 
 
+def _minio_client(settings: Settings) -> Minio:
+    return Minio(
+        settings.MINIO_ENDPOINT,
+        access_key=settings.MINIO_ACCESS_KEY,
+        secret_key=settings.MINIO_SECRET_KEY,
+        secure=settings.MINIO_SECURE,
+    )
+
+
+async def _sleep_while(should_continue: Callable[[], bool], seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while should_continue() and time.monotonic() < deadline:
+        await asyncio.sleep(0.2)
+    return should_continue()
+
+
+async def _wait_for_postgres(
+    repository: DetectionsRepository,
+    should_continue: Callable[[], bool],
+) -> bool:
+    delay = 1.0
+    while should_continue():
+        try:
+            await repository.ping()
+        except SQLAlchemyError as exc:
+            logger.warning("postgres unavailable: %s", exc)
+            if not await _sleep_while(should_continue, delay):
+                return False
+            delay = min(delay * 2, 10.0)
+            continue
+        return True
+    return False
+
+
 async def _consume(stop_event: threading.Event) -> None:
     settings = get_settings()
-    service = DetectionsService()
 
     def should_continue() -> bool:
         return not stop_event.is_set()
 
-    if not service.load_model():
+    try:
+        classifier = Classifier(Path(settings.MODEL_WEIGHTS))
+    except FileNotFoundError:
+        logger.error("weights not found: %s", settings.MODEL_WEIGHTS)
         return
-    if not await service.wait_for_postgres(should_continue):
+    logger.info("model loaded, classes: %s", ", ".join(classifier.class_names))
+
+    repository = DetectionsRepository(AsyncSessionLocal)
+    service = DetectionService(repository, _minio_client(settings), classifier)
+    if not await _wait_for_postgres(repository, should_continue):
         return
 
     consumer = AIOKafkaConsumer(
@@ -61,14 +108,19 @@ async def _consume(stop_event: threading.Event) -> None:
                 continue
             for messages in batches.values():
                 for message in messages:
-                    stored = await service.consume_record(
-                        message.value,
-                        message.offset,
-                        should_continue,
-                    )
-                    if stored is None:
+                    refs = frame_refs(message.value)
+                    if not refs:
+                        logger.warning(
+                            "message has no bucket and object.key, offset=%s",
+                            message.offset,
+                        )
                         await consumer.commit()
                         continue
+                    stored = True
+                    for frame in refs:
+                        if not await service.process_frame(frame, should_continue):
+                            stored = False
+                            break
                     if not stored:
                         return
                     await consumer.commit()
@@ -98,7 +150,7 @@ async def run_consumer(stop: threading.Event | None = None) -> None:
             logger.exception("consumer failed")
             if stop_event.is_set():
                 return
-            if not await async_sleep_while(lambda: not stop_event.is_set(), delay):
+            if not await _sleep_while(lambda: not stop_event.is_set(), delay):
                 return
             delay = min(delay * 2, 30.0)
 

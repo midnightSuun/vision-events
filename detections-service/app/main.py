@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.consumer import run_consumer
+from app.detections.consumer import run_consumer
 
 logger = logging.getLogger("detections-service")
 
