@@ -28,6 +28,21 @@ const App = () => {
       }
     }
     void loadDetections()
+
+    const source = new EventSource('/detections/stream')
+    source.onmessage = (event) => {
+      const row = JSON.parse(event.data) as Detection
+      setDetections((current) => {
+        if (current.some((item) => item.id === row.id)) {
+          return current
+        }
+        return [row, ...current]
+      })
+    }
+
+    return () => {
+      source.close()
+    }
   }, [])
 
   if (error) {
