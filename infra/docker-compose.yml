@@ -239,9 +239,14 @@ services:
       context: ../core-api
     environment:
       DATABASE_URL: postgresql://vision:vision@postgres:5432/vision
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      KAFKA_TOPIC: vision.public.detections
+      KAFKA_GROUP_ID: core-api
     ports:
       - "8001:8000"
     depends_on:
+      kafka:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       dbmate:
