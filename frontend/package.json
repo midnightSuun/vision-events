@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "format": "prettier --write .",
     "lint": "eslint . --fix",
+    "typegen": "openapi-typescript http://localhost:8001/openapi.json -o src/api/schema.d.ts",
     "prepare": "husky install",
     "preview": "vite preview"
   },
@@ -15,6 +16,7 @@
     "@tanstack/react-query": "^5.107.1",
     "@tanstack/react-router": "^1.170.46",
     "openapi-fetch": "^0.17.0",
+    "openapi-react-query": "^0.5.4",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },
@@ -35,6 +37,7 @@
     "husky": "^9.1.7",
     "jsdom": "^31.0.0",
     "lint-staged": "^17.6.0",
+    "openapi-typescript": "^7.13.0",
     "prettier": "^3.9.10",
     "typescript": "~6.0.3",
     "typescript-eslint": "^8.72.1",
